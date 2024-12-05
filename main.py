@@ -2,14 +2,16 @@
 # coding: utf-8
 # @Filename:  main.py
 # @Author:    Nathan Lui
-# @Date:      12/04/2024
+# @Date:      12/05/2024
 
+import argparse
 import os
 import warnings
 
 import evaluate
-import numpy as np
+
 import torch
+import numpy as np
 from datasets import load_dataset, load_from_disk
 from huggingface_hub.hf_api import HfFolder
 from peft import (LoraConfig, PeftModel, get_peft_model,
@@ -26,23 +28,9 @@ from utils import (find_target_modules, get_gpu_utilization,
 from utils import print_main as print
 
 warnings.filterwarnings("ignore", category=UserWarning)
+DASH_LINE = "-".join("" for x in range(100))
 
-
-def generate(model, prompt, tokenizer, maxlen=100, sample=True):
-    toks = tokenizer(prompt, return_tensors="pt")
-    res = model.generate(
-        **toks.to(torch.cuda.current_device()),
-        max_new_tokens=maxlen,
-        do_sample=sample,
-        num_return_sequences=1,
-        temperature=0.1,
-        num_beams=1,
-        top_p=0.95,
-    ).to("cpu")
-    return tokenizer.batch_decode(res, skip_special_tokens=True)
-
-
-def main():
+def main(args):
     # set random seed
     seed = 42
 
@@ -88,61 +76,58 @@ def main():
     eval_tokenizer.pad_token = eval_tokenizer.eos_token
 
     # test baseline performance
-    index = 42
+    prompt, summary, output = qualitative_eval(original_model, eval_tokenizer, dataset)
 
-    prompt = dataset["test"][index]["dialogue"]
-    summary = dataset["test"][index]["summary"]
-
-    formatted_prompt = (
-        f"Instruct: Summarize the following conversation.\n{prompt}\nOutput:\n"
-    )
-    res = generate(
-        model=original_model,
-        prompt=formatted_prompt,
-        tokenizer=eval_tokenizer,
-    )
-    output = res[0].split("\nOutput:\n")[1]
-
-    dash_line = "-".join("" for x in range(100))
-    print(dash_line)
-    print(f"INPUT PROMPT:\n{formatted_prompt.split('Output')[0]}")
-    print(dash_line)
+    DASH_LINE = "-".join("" for x in range(100))
+    print(DASH_LINE)
+    print(f"INPUT PROMPT:\n{prompt.split('Output')[0]}")
+    print(DASH_LINE)
     print(f"BASELINE HUMAN SUMMARY:\n{summary}\n")
-    print(dash_line)
+    print(DASH_LINE)
     print(f"MODEL GENERATION - ZERO SHOT:\n{output}")
-    print(dash_line)
+    print(DASH_LINE)
 
-    # preprocessing dataset
+    # preprocess dataset
     print()
     max_length = get_max_length(original_model)
 
-    # use saved datasets if available, else preprocess
-    train_path = "./data/train_dataset.hf"
-    if os.path.exists(train_path):
-        train_dataset = load_from_disk(train_path)
-    else:
-        train_dataset = preprocess_dataset(
-            tokenizer, max_length, seed, dataset["train"]
-        )
-        train_dataset.save_to_disk(
-            train_path
-        )  # saves tokenized train dataset as arrow file
+    print(f"\nShapes of the datasets:")
+    if args.train:
+        print(f"Training: {train_dataset.shape}")
+        # use saved datasets if available, else preprocess
+        train_path = os.path.join(args.data_path, "train_dataset.hf")
+        if os.path.exists(train_path) and not args.retokenize:
+            train_dataset = load_from_disk(train_path)
+        else:
+            train_dataset = preprocess_dataset(
+                tokenizer, max_length, seed, dataset["train"]
+            )
+            train_dataset.save_to_disk(
+                train_path
+            )  # saves tokenized train dataset as arrow file
 
-    eval_path = "./data/eval_dataset.hf"
-    if os.path.exists(eval_path):
+    # use saved datasets if available, else preprocess
+    eval_path = os.path.join(args.data_path, "eval_dataset.hf")
+    if os.path.exists(eval_path) and not args.retokenize:
         eval_dataset = load_from_disk(eval_path)
     else:
         eval_dataset = preprocess_dataset(
             tokenizer, max_length, seed, dataset["validation"]
         )
         eval_dataset.save_to_disk(
-            "./data/eval_dataset.hf"
+            eval_path
         )  # saves tokenized eval dataset as arrow file
-
-    print(f"\nShapes of the datasets:")
-    print(f"Training: {train_dataset.shape}")
     print(f"Validation: {eval_dataset.shape}")
 
+    if args.train:
+        train(original_model, tokenizer, train_dataset, eval_dataset, args.log_dir, args.output_dir)
+        eval(original_model, get_last_checkpoint(args.output_dir), eval_tokenizer, dataset)
+    elif args.eval:
+        torch.cuda.empty_cache()
+        eval(original_model, args.model_ckpt, eval_tokenizer, dataset)
+        
+
+def train(original_model, train_tokenizer, train_dataset, eval_dataset, log_dir, output_dir):
     print("\nOriginal model parameters:")
     print(get_number_of_trainable_model_parameters(original_model))
 
@@ -167,8 +152,6 @@ def main():
     print("\nPEFT model parameters:")
     print(get_number_of_trainable_model_parameters(peft_model), "\n")
 
-    output_dir = "./results/checkpoints_1"
-
     peft_training_args = TrainingArguments(
         output_dir=output_dir,
         warmup_steps=1,
@@ -178,13 +161,13 @@ def main():
         learning_rate=2e-4,
         optim="paged_adamw_8bit",
         logging_strategy="epoch",
-        logging_dir="./results/logs_1",
-        log_level="info",
+        logging_dir=log_dir,
+        log_level="passive",
         save_strategy="epoch",
         eval_strategy="epoch",
         do_eval=True,
         gradient_checkpointing=True,
-        report_to="none",
+        report_to="tensorboard",
         overwrite_output_dir="True",
         group_by_length=True,
         ddp_backend="nccl",
@@ -198,16 +181,18 @@ def main():
 
     peft_trainer = Trainer(
         model=peft_model,
+        args=peft_training_args,
+        data_collator=DataCollatorForLanguageModeling(train_tokenizer, mlm=False),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        args=peft_training_args,
-        data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
     )
 
     ## lfg
     peft_trainer.train()
 
+    print("Training complete...\nCurrent GPU memory usage:")
     print(get_gpu_utilization())
+    print("Freeing up memory...")
 
     # Free memory for merging weights
     del peft_trainer
@@ -215,36 +200,119 @@ def main():
     print(get_gpu_utilization())
 
 
+def eval(original_model, ft_ckpt, eval_tokenizer, dataset):
+    """Evaluate the performance of the fine-tuned model over the original model
+
+    :param Phi3ForCausalLM original_model: Original model (phi-3.5-mini-instruct)
+    :param str ft_ckpt: Path to the fine-tuned model checkpoint
+    :param AutoTokenizer eval_tokenizer: Tokenizer for evaluation
+    :param Dataset dataset: Dataset with a test set of dialogues and summaries
+    """
     # qualitiative eval
     ft_model = PeftModel.from_pretrained(
         original_model,
-        get_last_checkpoint(output_dir),
+        ft_ckpt,
         torch_dtype=torch.bfloat16,
         is_trainable=False,
     )
 
-    index = 42
+    # qualitative eval
+    prompt, summary, prefix = qualitative_eval(model=ft_model, eval_tokenizer=eval_tokenizer, dataset=dataset)
+
+    print(DASH_LINE)
+    print(f"INPUT PROMPT:\n{prompt}")
+    print(DASH_LINE)
+    print(f"BASELINE HUMAN SUMMARY:\n{summary}\n")
+    print(DASH_LINE)
+    print(f"PEFT MODEL:\n{prefix}")
+
+    # quantitative eval
+    original_model_results, peft_model_results = eval_rouge(
+        original_model=original_model,
+        ft_model=ft_model,
+        eval_tokenizer=eval_tokenizer,
+        dataset=dataset)
+
+    print()
+    print("ORIGINAL MODEL:")
+    print(original_model_results)
+    print("PEFT MODEL:")
+    print(peft_model_results)
+
+    print()
+    print("Absolute percentage improvement of PEFT MODEL over ORIGINAL MODEL")
+
+    improvement = np.array(list(peft_model_results.values())) - np.array(
+        list(original_model_results.values())
+    )
+    for key, value in zip(peft_model_results.keys(), improvement):
+        print(f"{key}: {value*100:.2f}%")
+
+
+def generate(model, prompt, tokenizer, maxlen=100, sample=True):
+    """Generate a response from the laugnage model for a single prompt
+    
+    :param Phi3ForCausalLM model: Model to generate responses
+    :param str prompt: Prompt to generate responses
+    :param AutoTokenizer tokenizer: Tokenizer for the model
+    :param int maxlen: maximum number of tokens to generate (lenthg of response)
+    :param bool sample: sample next token from a probability distribution over the whole vocabulary
+    :return response: response generated by the model
+    :rtype: List[str]
+    """
+    toks = tokenizer(prompt, return_tensors="pt")
+    res = model.generate(
+        **toks.to(torch.cuda.current_device()),
+        max_new_tokens=maxlen,
+        do_sample=sample,
+        num_return_sequences=1,
+        temperature=0.1,
+        num_beams=1,
+        top_p=0.95,
+    ).to("cpu")
+    return tokenizer.batch_decode(res, skip_special_tokens=True)
+
+
+def qualitative_eval(model, eval_tokenizer, dataset, idx=42):
+    """Summarize a dialogue and compare it with the human summary
+    
+    :param Phi3ForCausalLM model: model to test
+    :param AutoTokenizer eval_tokenizer: Tokenizer for evaluation
+    :param Dataset dataset: Dataset with a test set of dialogues and summaries
+    :param int idx: Index of the dialogue to summarize
+    :return str prompt: Prompt for language model
+    :return str summary: Human summary
+    :return str output: Generated summary
+    :rtype: Tuple[str, str, str]
+    """
+    index = idx
     dialogue = dataset["test"][index]["dialogue"]
     summary = dataset["test"][index]["summary"]
 
     prompt = f"Instruct: Summarize the following conversation.\n{dialogue}\nOutput:\n"
 
-    peft_model_res = generate(
-        model=ft_model,
+    res = generate(
+        model=model,
         prompt=prompt,
         tokenizer=eval_tokenizer,
     )
-    peft_model_output = peft_model_res[0].split("Output:\n")[1]
-    prefix, _, _ = peft_model_output.partition("\nEnd.")
+    output = res[0].split("\nOutput:\n")[1]
+    output = output.split("\nEnd.")[0]
 
-    print(dash_line)
-    print(f"INPUT PROMPT:\n{prompt.split('Output')[0]}")
-    print(dash_line)
-    print(f"BASELINE HUMAN SUMMARY:\n{summary}\n")
-    print(dash_line)
-    print(f"PEFT MODEL:\n{prefix}")
+    return prompt.split('Output')[0], summary, output
 
-    # quantitative eval
+
+def eval_rouge(original_model, ft_model, eval_tokenizer, dataset):
+    """Evlauate the performance improvement of the fine-tuned model over the original model 
+    using ROUGE score
+
+    :param Phi3ForCausalLM original_model: Original model (phi-3.5-mini-instruct)
+    :param Phi3ForCausalLM ft_model: Fine-tuned model
+    :param Tokenizer eval_tokenizer: Tokenizer for evaluation
+    :param Dataset dataset: Dataset with a test set of dialogues and summaries
+    :return original_model_scores: ROUGE score for the original mode
+    :return peft_model_scores: ROUGE score for the fine-tuned model
+    """
     dialogues = dataset["test"][0:10]["dialogue"]
     human_baseline_summaries = dataset["test"][0:10]["summary"]
 
@@ -274,7 +342,6 @@ def main():
         original_model_summaries.append(original_model_text_output)
         peft_model_summaries.append(peft_model_text_output)
 
-    # evaluate performance improvement
     rouge = evaluate.load("rouge")
 
     original_model_results = rouge.compute(
@@ -291,26 +358,14 @@ def main():
         use_stemmer=True,
     )
 
-    print()
-    print("ORIGINAL MODEL:")
-    print(original_model_results)
-    print("PEFT MODEL:")
-    print(peft_model_results)
-
-    print()
-    print("Absolute percentage improvement of PEFT MODEL over ORIGINAL MODEL")
-
-    improvement = np.array(list(peft_model_results.values())) - np.array(
-        list(original_model_results.values())
-    )
-    for key, value in zip(peft_model_results.keys(), improvement):
-        print(f"{key}: {value*100:.2f}%")
+    return original_model_results, peft_model_results
 
 
 if __name__ == "__main__":
-    # read HF Hub access token
-    with open("hf_token.txt", "r") as f:
-        HfFolder.save_token(f.read().strip())
+    # if there is no saved HF access token, read from file
+    if HfFolder.get_token() is None:
+        with open("hf_token.txt", "r") as f:
+            HfFolder.save_token(f.read().strip())
 
     # set random seed
     set_seed(42)
@@ -319,11 +374,61 @@ if __name__ == "__main__":
     os.environ["NCCL_P2P_DISABLE"] = "1"
     os.environ["NCCL_IB_DISABLE"] = "1"
 
-    # disable Weights and Biases
-    os.environ["WANDB_DISABLED"] = "true"
+    # parse cli arguments
+    parser = argparse.ArgumentParser(
+        description="Fine-tune a language model using PEFT",
+        usage="accelerate launch --num_processes 2 main.py [options]",
+        epilog="Written by Nathan Lui",
+        add_help=True,
+    )
+    usage = parser.add_mututally_exclusive_group(required=True)
+    usage.add_argument(
+        "--train",
+        action="store_true",
+        help="Train the model",
+    )
+    usage.add_argument(
+        "--eval",
+        action="store_true",
+        help="Evaluate the model (requires model checkpoint)",
+    )
+    parser.add_argument(
+        "--retokenize",
+        action="store_true",
+        help="Re-tokenize the dataset",
+    )
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        default="./data",
+        help="Path to the dataset",
+    )
+    parser.add_argument(
+        "--model_ckpt",
+        type=str,
+        default=None,
+        help="Path to the model checkpoint",
+    )
+    parser.add_argument(
+        "--log_dir",
+        type=str,
+        default="./results/logs",
+        help="Directory to save the training logs",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./results/checkpoints",
+        help="Directory to save the fine-tuned model checkpoints",
+    )
+    
+    args = parser.parse_args()
+
+    if args.eval and args.model_ckpt is None:
+        parser.error("--eval requires --model_ckpt")
 
     # use tf32 precision for matmul
     # torch.backends.cuda.matmul.allow_tf32 = True
     # torch.backends.cudnn.allow_tf32 = True
 
-    main()
+    main(args)
