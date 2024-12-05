@@ -2,7 +2,7 @@
 # coding: utf-8
 # @Filename:  utils.py
 # @Author:    Nathan Lui
-# @Date:      12/04/2024
+# @Date:      12/05/2024
 
 import os
 import re
@@ -10,24 +10,39 @@ import re
 from functools import partial
 
 import torch
-from transformers import AutoTokenizer
+from datasets import Dataset
 from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo
 
 
-def get_gpu_utilization():
+def get_gpu_utilization() -> str:
+    """Get the GPU memory utilization
+    
+    :return str msg: Message containing the GPU memory utilization
+    :rtype: str
+    """
     nvmlInit()
     handle = nvmlDeviceGetHandleByIndex(0)
     info = nvmlDeviceGetMemoryInfo(handle)
     return f"GPU memory occupied: {info.used//1024**2} MB."
 
 
-def print_main(s: str = ""):
-    """Check if this process is running on GPU:0, if so print the message"""
+def print_main(s: str = "") -> None:
+    """Check if this process is running on GPU:0, if so print the message
+    
+    :param str s: Message to print
+    :return: None
+    """
     if torch.cuda.current_device() == 0:
         print(s)
 
 
-def get_number_of_trainable_model_parameters(model):
+def get_number_of_trainable_model_parameters(model) -> str:
+    """Get the number of trainable model parameters
+
+    :param model: Model to get the number of trainable parameters from
+    :return str msg: Message containing the number of trainable model parameters
+    :rtype: str
+    """
     trainable_model_params = 0
     all_model_params = 0
     for _, param in model.named_parameters():
@@ -39,9 +54,12 @@ def get_number_of_trainable_model_parameters(model):
         f"percentage of trainable model parameters: {100 * trainable_model_params / all_model_params:.2f}%")
 
 
-def find_target_modules(model):
+def find_target_modules(model) -> list[str]:
     """Find all the modules in the model that are of type 'Linear4bit'
+
     :param model: Model to search for target modules
+    :return list modules: List of target module names
+    :rtype: list[str]
     """
     # initialize a set to store unique layers
     unique_layers = set()
@@ -60,11 +78,13 @@ def find_target_modules(model):
     return list(unique_layers)
 
 
-def create_prompt_formats(sample):
-    """
-    Format various fields of the sample ('instruction','output')
+def create_prompt_formats(sample) -> dict:
+    """Format various fields of the sample ('instruction','output')
     Then concatenate them using two newline characters
-    :param sample: Sample dictionnary
+
+    :param dict sample: prompt to format
+    :return dict sample: formatted prompt
+    :rtype: dict
     """
     INTRO_BLURB = "Below is an instruction that describes a task. \
         Write a response that appropriately completes the request."
@@ -89,7 +109,13 @@ def create_prompt_formats(sample):
 
 
 # SOURCE https://github.com/databrickslabs/dolly/blob/master/training/trainer.py
-def get_max_length(model):
+def get_max_length(model) -> int:
+    """Get the maximum length of the model
+    
+    :param model: Model to get the maximum length from
+    :return int max_length: Maximum length of the model
+    :rtype: int
+    """
     max_length = None
     for length_setting in ["n_positions", "max_position_embeddings", "seq_length"]:
         max_length = getattr(model.config, length_setting, None)
@@ -103,7 +129,13 @@ def get_max_length(model):
 
 
 def preprocess_batch(batch, tokenizer, max_length):
-    """Tokenizing a batch"""
+    """Tokenize a batch
+    
+    :param batch: Batch to tokenize
+    :param tokenizer: Model Tokenizer
+    :param max_length: Maximum number of tokens to emit from tokenizer
+    :return btch: Tokenized batch
+    """
     return tokenizer(
         batch["text"],
         max_length=max_length,
@@ -112,15 +144,20 @@ def preprocess_batch(batch, tokenizer, max_length):
 
 
 # SOURCE https://github.com/databrickslabs/dolly/blob/master/training/trainer.py
-def preprocess_dataset(tokenizer: AutoTokenizer, max_length: int, seed, dataset):
+def preprocess_dataset(tokenizer, data, max_length=100, seed=42) -> Dataset:
     """Format & tokenize it so it is ready for training
-    :param tokenizer (AutoTokenizer): Model Tokenizer
-    :param max_length (int): Maximum number of tokens to emit from tokenizer
+
+    :param AutoTokenizer tokenizer: Model Tokenizer
+    :param Dataset data: Dataset to preprocess
+    :param int max_length: Maximum number of tokens to emit from tokenizer
+    :param int seed: Seed for shuffling the dataset
+    :return Dataset dataset: Preprocessed dataset
+    :rtype: Dataset
     """
 
     # Add prompt to each sample
     print_main("Preprocessing dataset...")
-    dataset = dataset.map(create_prompt_formats)  # , batched=True)
+    dataset = data.map(create_prompt_formats)  # , batched=True)
 
     _preprocessing_function = partial(
         preprocess_batch, max_length=max_length, tokenizer=tokenizer
@@ -140,12 +177,15 @@ def preprocess_dataset(tokenizer: AutoTokenizer, max_length: int, seed, dataset)
     return dataset
 
 
-def get_last_checkpoint(directory):
+def get_last_checkpoint(directory) -> os.PathLike:
     """Get the latest checkpoint in the directory
+
     :param directory: Directory to search for checkpoints
+    :return: Path to the latest checkpoint or None if no checkpoint is found
+    :rtype: Union[str, None]
     """
 
-    # Regular expression to match "checkpoint-<number>"
+    # regular expression to match "checkpoint-<number>"
     checkpoint_pattern = re.compile(r'checkpoint-(\d+)')
     
     latest_checkpoint = None
