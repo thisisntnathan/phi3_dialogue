@@ -2,33 +2,42 @@
 # coding: utf-8
 # @Filename:  main.py
 # @Author:    Nathan Lui
-# @Date:      12/05/2024
+# @Date:      12/10/2024
 
 import argparse
 import os
 import warnings
 
 import evaluate
-
-import torch
 import numpy as np
+import torch
 from datasets import load_dataset, load_from_disk
 from huggingface_hub.hf_api import HfFolder
-from peft import (LoraConfig, PeftModel, get_peft_model,
-                  prepare_model_for_kbit_training)
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          BitsAndBytesConfig, DataCollatorForLanguageModeling,
-                          Trainer, TrainingArguments, set_seed)
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    DataCollatorForLanguageModeling,
+    Trainer,
+    TrainingArguments,
+    set_seed,
+)
 from trl import get_kbit_device_map
 
-from utils import (find_target_modules, get_gpu_utilization,
-                   get_last_checkpoint, get_max_length,
-                   get_number_of_trainable_model_parameters,
-                   preprocess_dataset)
+from utils import (
+    find_target_modules,
+    get_gpu_utilization,
+    get_last_checkpoint,
+    get_max_length,
+    get_number_of_trainable_model_parameters,
+    preprocess_dataset,
+)
 from utils import print_main as print
 
 warnings.filterwarnings("ignore", category=UserWarning)
 DASH_LINE = "-".join("" for x in range(100))
+
 
 def main(args):
     # set random seed
@@ -91,9 +100,8 @@ def main(args):
     print()
     max_length = get_max_length(original_model)
 
-    print(f"\nShapes of the datasets:")
+    print("\nShapes of the datasets:")
     if args.train:
-        print(f"Training: {train_dataset.shape}")
         # use saved datasets if available, else preprocess
         train_path = os.path.join(args.data_path, "train_dataset.hf")
         if os.path.exists(train_path) and not args.retokenize:
@@ -105,6 +113,7 @@ def main(args):
             train_dataset.save_to_disk(
                 train_path
             )  # saves tokenized train dataset as arrow file
+        print(f"Training: {train_dataset.shape}")
 
     # use saved datasets if available, else preprocess
     eval_path = os.path.join(args.data_path, "eval_dataset.hf")
@@ -120,14 +129,28 @@ def main(args):
     print(f"Validation: {eval_dataset.shape}")
 
     if args.train:
-        train(original_model, tokenizer, train_dataset, eval_dataset, args.log_dir, args.output_dir)
-        eval(original_model, get_last_checkpoint(args.output_dir), eval_tokenizer, dataset)
+        train(
+            original_model,
+            tokenizer,
+            train_dataset,
+            eval_dataset,
+            args.log_dir,
+            args.output_dir,
+        )
+        eval(
+            original_model,
+            get_last_checkpoint(args.output_dir),
+            eval_tokenizer,
+            dataset,
+        )
     elif args.eval:
         torch.cuda.empty_cache()
         eval(original_model, args.model_ckpt, eval_tokenizer, dataset)
-        
 
-def train(original_model, train_tokenizer, train_dataset, eval_dataset, log_dir, output_dir):
+
+def train(
+    original_model, train_tokenizer, train_dataset, eval_dataset, log_dir, output_dir
+):
     print("\nOriginal model parameters:")
     print(get_number_of_trainable_model_parameters(original_model))
 
@@ -217,7 +240,9 @@ def eval(original_model, ft_ckpt, eval_tokenizer, dataset):
     )
 
     # qualitative eval
-    prompt, summary, prefix = qualitative_eval(model=ft_model, eval_tokenizer=eval_tokenizer, dataset=dataset)
+    prompt, summary, prefix = qualitative_eval(
+        model=ft_model, eval_tokenizer=eval_tokenizer, dataset=dataset
+    )
 
     print(DASH_LINE)
     print(f"INPUT PROMPT:\n{prompt}")
@@ -231,7 +256,8 @@ def eval(original_model, ft_ckpt, eval_tokenizer, dataset):
         original_model=original_model,
         ft_model=ft_model,
         eval_tokenizer=eval_tokenizer,
-        dataset=dataset)
+        dataset=dataset,
+    )
 
     print()
     print("ORIGINAL MODEL:")
@@ -251,7 +277,7 @@ def eval(original_model, ft_ckpt, eval_tokenizer, dataset):
 
 def generate(model, prompt, tokenizer, maxlen=100, sample=True):
     """Generate a response from the laugnage model for a single prompt
-    
+
     :param Phi3ForCausalLM model: Model to generate responses
     :param str prompt: Prompt to generate responses
     :param AutoTokenizer tokenizer: Tokenizer for the model
@@ -275,7 +301,7 @@ def generate(model, prompt, tokenizer, maxlen=100, sample=True):
 
 def qualitative_eval(model, eval_tokenizer, dataset, idx=42):
     """Summarize a dialogue and compare it with the human summary
-    
+
     :param Phi3ForCausalLM model: model to test
     :param AutoTokenizer eval_tokenizer: Tokenizer for evaluation
     :param Dataset dataset: Dataset with a test set of dialogues and summaries
@@ -299,11 +325,11 @@ def qualitative_eval(model, eval_tokenizer, dataset, idx=42):
     output = res[0].split("\nOutput:\n")[1]
     output = output.split("\nEnd.")[0]
 
-    return prompt.split('Output')[0], summary, output
+    return prompt.split("Output")[0], summary, output
 
 
 def eval_rouge(original_model, ft_model, eval_tokenizer, dataset):
-    """Evlauate the performance improvement of the fine-tuned model over the original model 
+    """Evlauate the performance improvement of the fine-tuned model over the original model
     using ROUGE score
 
     :param Phi3ForCausalLM original_model: Original model (phi-3.5-mini-instruct)
@@ -421,7 +447,7 @@ if __name__ == "__main__":
         default="./results/checkpoints",
         help="Directory to save the fine-tuned model checkpoints",
     )
-    
+
     args = parser.parse_args()
 
     if args.eval and args.model_ckpt is None:
