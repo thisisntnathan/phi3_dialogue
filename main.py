@@ -40,9 +40,6 @@ DASH_LINE = "-".join("" for x in range(100))
 
 
 def main(args):
-    # set random seed
-    seed = 42
-
     # load the dataset
     # https://huggingface.co/datasets/knkarthick/dialogsum
     huggingface_dataset_name = "knkarthick/dialogsum"
@@ -108,7 +105,7 @@ def main(args):
             train_dataset = load_from_disk(train_path)
         else:
             train_dataset = preprocess_dataset(
-                tokenizer, max_length, seed, dataset["train"]
+                tokenizer, max_length, args.seed, dataset["train"]
             )
             train_dataset.save_to_disk(
                 train_path
@@ -121,7 +118,7 @@ def main(args):
         eval_dataset = load_from_disk(eval_path)
     else:
         eval_dataset = preprocess_dataset(
-            tokenizer, max_length, seed, dataset["validation"]
+            tokenizer, max_length, args.seed, dataset["validation"]
         )
         eval_dataset.save_to_disk(
             eval_path
@@ -393,9 +390,6 @@ if __name__ == "__main__":
         with open("hf_token.txt", "r") as f:
             HfFolder.save_token(f.read().strip())
 
-    # set random seed
-    set_seed(42)
-
     # # handle NCCL issues
     os.environ["NCCL_P2P_DISABLE"] = "1"
     os.environ["NCCL_IB_DISABLE"] = "1"
@@ -407,7 +401,7 @@ if __name__ == "__main__":
         epilog="Written by Nathan Lui",
         add_help=True,
     )
-    usage = parser.add_mututally_exclusive_group(required=True)
+    usage = parser.add_mutually_exclusive_group(required=True)
     usage.add_argument(
         "--train",
         action="store_true",
@@ -427,31 +421,57 @@ if __name__ == "__main__":
         "--data_path",
         type=str,
         default="./data",
-        help="Path to the dataset",
+        help="Path to the directory containing the dataset",
     )
     parser.add_argument(
         "--model_ckpt",
         type=str,
         default=None,
-        help="Path to the model checkpoint",
-    )
-    parser.add_argument(
-        "--log_dir",
-        type=str,
-        default="./results/logs",
-        help="Directory to save the training logs",
+        help="Path to the model checkpoint for evaluation",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./results/checkpoints",
-        help="Directory to save the fine-tuned model checkpoints",
+        default="./results",
+        help="Directory to save the fine-tuned model checkpoints and logs",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility",
     )
 
     args = parser.parse_args()
 
     if args.eval and args.model_ckpt is None:
         parser.error("--eval requires --model_ckpt")
+    elif args.eval and not os.path.exists(args.model_ckpt):
+        parser.error(f"Model checkpoint {args.model_ckpt} does not exist")
+    elif args.train and args.model_ckpt is not None:
+        warnings.warn(
+            "--train does not use --model_ckpt, ignoring --model_ckpt", SyntaxWarning
+        )
+
+    if not os.path.exists(args.data_path):
+        os.makedirs(args.data_path)
+
+    args.save_dir = os.path.join(args.output_dir, "ckpts")
+    args.log_dir = os.path.join(args.output_dir, "logs")
+
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+        os.makedirs(args.save_dir)
+        os.makedirs(args.log_dir)
+
+    if not os.path.exists(os.path.join(args.output_dir, "logs")):
+        os.makedirs(args.log_dir)
+    if not os.path.exists(os.path.join(args.output_dir, "checkpoints")):
+        os.makedirs(args.save_dir)
+
+    # set random seed
+    set_seed(args.seed)
+    torch.manual_seed(args.seed)
 
     # use tf32 precision for matmul
     # torch.backends.cuda.matmul.allow_tf32 = True
